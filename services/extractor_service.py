@@ -8,17 +8,18 @@ from io import BytesIO
 import cv2
 import easyocr
 import numpy as np
-from openai import OpenAI, APIError
+from openai import OpenAI
 from PIL import Image
 
 from config import app_config
 from exceptions import InvalidImageError, OCRServiceError, PatternNotFoundError
 from utils.image_preprocessor import load_and_validate_image, preprocess_image
 from utils.logger import setup_logging
+from utils.ocr_corrector import find_code_in_text, correct_ocr_text
 
 logger = setup_logging()
 
-UNLOCK_CODE_PATTERN = re.compile(r"(?:^|[^A-Z0-9])([A-Z0-9]{2,4}(?:-[A-Z0-9]{2,4}){3,4})(?:[^A-Z0-9]|$)")
+UNLOCK_CODE_PATTERN = re.compile(r"\b[A-Z0-9]{2,4}(-[A-Z0-9]{2,4}){3,4}\b")
 
 VISION_PROMPT = (
     "Look at this image carefully. Find and extract ONLY the unlock code. "
@@ -43,10 +44,16 @@ def _get_easyocr_reader() -> easyocr.Reader:
 
 def _encode_image_to_base64(image: np.ndarray) -> str:
     """Encode a numpy BGR image to base64 JPEG string."""
-    rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    if len(image.shape) == 2:
+        rgb_image = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
+    elif image.shape[2] == 3:
+        rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    else:
+        rgb_image = image
+
     pil_image = Image.fromarray(rgb_image)
     buffer = BytesIO()
-    pil_image.save(buffer, format="JPEG", quality=90)
+    pil_image.save(buffer, format="JPEG", quality=95)
     buffer.seek(0)
     b64_string = base64.b64encode(buffer.read()).decode("utf-8")
     return b64_string
@@ -56,10 +63,10 @@ def _call_vision_api(
     client: OpenAI,
     model_id: str,
     base64_image: str,
-    use_reasoning: bool = False,
+    max_retries: int = 3,
 ) -> tuple[str, int]:
     """
-    Call OpenRouter Vision API with the given model and base64 image.
+    Call OpenRouter Vision API with retry logic for rate limiting.
 
     Returns:
         Tuple of (response_text, http_status).
@@ -77,43 +84,36 @@ def _call_vision_api(
         "messages": [{"role": "user", "content": content}],
     }
 
-    if use_reasoning:
-        request_body["reasoning"] = {"enabled": True}
+    for attempt in range(max_retries):
+        try:
+            response = client.chat.completions.create(**request_body)
+            response_text = response.choices[0].message.content.strip()
+            return response_text, 200
+        except Exception as exc:
+            status_code = getattr(exc, "status_code", None)
+            if status_code is None:
+                status_code = getattr(exc, "code", None)
 
-    response = client.chat.completions.create(**request_body)
+            if status_code == 429 and attempt < max_retries - 1:
+                wait_time = (attempt + 1) * 15
+                logger.warning(f"Rate limited, waiting {wait_time}s before retry...")
+                time.sleep(wait_time)
+                continue
 
-    response_text = response.choices[0].message.content.strip()
-    return response_text, 200
+            raise exc
+
+    return "NOT_FOUND", 429
 
 
 def _extract_pattern_from_text(raw_text: str) -> tuple[list[str], str | None, int]:
     """
     Apply regex to extract unlock code candidates from raw text.
-    Converts text to uppercase before matching.
+    Uses OCR correction to fix common mistakes.
 
     Returns:
         Tuple of (candidates_list, selected_code_or_none, segment_count).
     """
-    upper_text = raw_text.upper()
-
-    # Split by whitespace and common delimiters to get tokens
-    import re as re_module
-    tokens = re_module.split(r'[\s,;]+', upper_text)
-
-    candidates: list[str] = []
-
-    for token in tokens:
-        # Check if token matches exactly 4-5 segments
-        segment_count = len(token.split("-"))
-        if 4 <= segment_count <= 5:
-            # Verify each segment is 2-4 chars of uppercase letters/digits
-            segments = token.split("-")
-            all_valid = all(
-                re_module.fullmatch(r"[A-Z0-9]{2,4}", seg)
-                for seg in segments
-            )
-            if all_valid and token not in candidates:
-                candidates.append(token)
+    candidates = find_code_in_text(raw_text)
 
     if not candidates:
         return [], None, 0
@@ -127,7 +127,6 @@ def _extract_pattern_from_text(raw_text: str) -> tuple[list[str], str | None, in
     segment_count = len(selected.split("-"))
 
     return candidates, selected, segment_count
-
 
 
 def extract_unlock_code(
@@ -190,6 +189,7 @@ def extract_unlock_code(
     models_tried: list[str] = []
     last_raw_output: str = ""
 
+    # ── Stage 1: EasyOCR ──
     if force_model is None or force_model == "easyocr":
         models_tried.append("easyocr")
         easyocr_start = time.time()
@@ -256,6 +256,7 @@ def extract_unlock_code(
                 duration_ms=easyocr_duration_ms,
             )
 
+    # ── Stage 2: Vision API ──
     client = OpenAI(
         base_url=app_config.OPENROUTER_BASE_URL,
         api_key=app_config.OPENROUTER_API_KEY,
@@ -269,7 +270,6 @@ def extract_unlock_code(
                 client=client,
                 model_id=app_config.PRIMARY_API_MODEL,
                 base64_image=base64_crop,
-                use_reasoning=False,
             )
             gemma_duration_ms = round((time.time() - gemma_start) * 1000, 2)
             last_raw_output = response_text
@@ -330,7 +330,6 @@ def extract_unlock_code(
                 client=client,
                 model_id=app_config.SECONDARY_API_MODEL,
                 base64_image=base64_crop,
-                use_reasoning=True,
             )
             nemotron_duration_ms = round((time.time() - nemotron_start) * 1000, 2)
             last_raw_output = response_text
