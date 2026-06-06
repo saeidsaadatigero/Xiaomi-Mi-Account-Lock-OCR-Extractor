@@ -1,5 +1,3 @@
-MARKDOWN
-Copy
 <div align="center">
 
 # 🔓 Xiaomi Mi Account Lock OCR Extractor
