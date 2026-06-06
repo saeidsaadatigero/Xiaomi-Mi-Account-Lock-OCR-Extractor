@@ -103,13 +103,41 @@ def preprocess_image(image: np.ndarray) -> tuple[np.ndarray, bool, tuple[int, in
     if cropped.size == 0:
         cropped = image[int(img_height * 0.7):, :]
 
-    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
-    cropped_yuv = cv2.cvtColor(cropped, cv2.COLOR_BGR2YUV)
-    cropped_yuv[:, :, 0] = clahe.apply(cropped_yuv[:, :, 0])
-    cropped = cv2.cvtColor(cropped_yuv, cv2.COLOR_YUV2BGR)
+    # Convert to LAB color space for better contrast enhancement
+    lab = cv2.cvtColor(cropped, cv2.COLOR_BGR2LAB)
+    l_channel, a_channel, b_channel = cv2.split(lab)
 
+    # Apply CLAHE to L channel
+    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+    l_enhanced = clahe.apply(l_channel)
+
+    # Merge back
+    lab_enhanced = cv2.merge([l_enhanced, a_channel, b_channel])
+    cropped = cv2.cvtColor(lab_enhanced, cv2.COLOR_LAB2BGR)
+
+    # Denoise
     cropped = cv2.fastNlMeansDenoising(cropped, h=10)
 
+    # Convert to grayscale and apply adaptive threshold for better OCR
+    gray_crop = cv2.cvtColor(cropped, cv2.COLOR_BGR2GRAY)
+
+    # Apply morphological operations to clean up
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
+    morph = cv2.morphologyEx(gray_crop, cv2.MORPH_CLOSE, kernel)
+
+    # Adaptive threshold to handle variable lighting
+    thresh = cv2.adaptiveThreshold(
+        morph, 255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY,
+        blockSize=11,
+        C=2
+    )
+
+    # Convert back to BGR for consistency
+    cropped = cv2.cvtColor(thresh, cv2.COLOR_GRAY2BGR)
+
+    # Upscale if too small
     crop_height = cropped.shape[0]
     if crop_height < 100:
         cropped = cv2.resize(
