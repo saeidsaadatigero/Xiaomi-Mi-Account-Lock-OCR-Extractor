@@ -126,7 +126,7 @@ def _extract_pattern_from_text(raw_text: str) -> tuple[list[str], str | None, in
     selected = selected.strip()
     segment_count = len(selected.split("-"))
 
-    return valid_candidates, selected, segment_count
+    return candidates, selected, segment_count
 
 
 
