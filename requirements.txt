@@ -1,0 +1,8 @@
+opencv-python-headless==4.9.0.80
+Pillow==10.3.0
+easyocr==1.7.1
+openai==1.30.0
+structlog==24.1.0
+python-decouple==3.8
+pytest==8.2.0
+pytest-mock==3.14.0
