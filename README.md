@@ -181,8 +181,3 @@ Made with ❤️ by Saeid Saadatigero
 ⭐ Don't forget to star if you like it! ⭐
 
 ```
-POWERSHELL
-Copy
-git add README.md
-git commit -m "docs: add comprehensive English README"
-git push
